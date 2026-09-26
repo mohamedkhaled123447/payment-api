@@ -22,7 +22,8 @@ class CybersourceThreeDSProviderTest {
     void mapsTheSetupRequestAndResponse() {
         CybersourceClient client = mock(CybersourceClient.class);
         CybersourceThreeDSProvider provider = new CybersourceThreeDSProvider(client);
-        ThreeDSSetupRequest request = new ThreeDSSetupRequest(new ThreeDSCard("4111111111111111", "12", "2028"));
+        ThreeDSSetupRequest request = new ThreeDSSetupRequest(
+                new ThreeDSCard("4111111111111111", "12", "2028"));
         RiskV1AuthenticationSetupsPost201Response cybersourceResponse = new RiskV1AuthenticationSetupsPost201Response()
                 .consumerAuthenticationInformation(new RiskV1AuthenticationSetupsPost201ResponseConsumerAuthenticationInformation()
                         .referenceId("reference-id")
@@ -45,7 +46,8 @@ class CybersourceThreeDSProviderTest {
     void mapsCybersourceErrorsToProviderErrors() {
         CybersourceClient client = mock(CybersourceClient.class);
         CybersourceThreeDSProvider provider = new CybersourceThreeDSProvider(client);
-        ThreeDSSetupRequest request = new ThreeDSSetupRequest(new ThreeDSCard("4111111111111111", "12", "2028"));
+        ThreeDSSetupRequest request = new ThreeDSSetupRequest(
+                new ThreeDSCard("4111111111111111", "12", "2028"));
         when(client.authenticationSetup(org.mockito.ArgumentMatchers.any(PayerAuthSetupRequest.class)))
                 .thenThrow(new CybersourceClientException("Cybersource error", new RuntimeException()));
 
