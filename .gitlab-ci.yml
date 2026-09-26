@@ -1,0 +1,111 @@
+stages:
+  - build
+  - publish
+  - deploy
+
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=.m2/repository"
+  OPENSHIFT_DEPLOYMENT: "payment-api"
+  OPENSHIFT_CONTAINER: "payment-api"
+
+cache:
+  paths:
+    - .m2/repository/
+
+# -------------------------
+# Build Spring Boot app
+# -------------------------
+build_app:
+  stage: build
+  image: maven:3.9.16-eclipse-temurin-21
+
+  script:
+    - mvn --batch-mode clean package
+
+    # Find the generated Spring Boot JAR
+    - JAR_FILE="$(find target -maxdepth 1 -type f -name '*.jar' ! -name 'original-*' | head -n 1)"
+    - test -n "$JAR_FILE"
+
+    # Rename it to a predictable name for Docker
+    - cp "$JAR_FILE" target/app.jar
+
+  artifacts:
+    paths:
+      - target/app.jar
+    expire_in: 1 hour
+
+
+# -------------------------
+# Build Docker image + push
+# -------------------------
+publish_docker_image:
+  stage: publish
+
+  image: docker:28.5.1-cli
+
+  services:
+    - name: docker:28.5.1-dind
+      alias: docker
+
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+
+  needs:
+    - job: build_app
+      artifacts: true
+
+  before_script:
+    - echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+
+  script:
+    - IMAGE_NAME="$DOCKERHUB_USERNAME/$DOCKERHUB_REPOSITORY"
+
+    # Build image with commit SHA
+    - docker build --pull -t "$IMAGE_NAME:$CI_COMMIT_SHORT_SHA" .
+
+    # Push commit-specific image
+    - docker push "$IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
+
+    # Also publish latest when building main
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "main" ]; then
+        docker tag "$IMAGE_NAME:$CI_COMMIT_SHORT_SHA" "$IMAGE_NAME:latest"
+        docker push "$IMAGE_NAME:latest"
+      fi
+
+
+# -------------------------
+# Deploy to OpenShift
+# -------------------------
+deploy_openshift:
+  stage: deploy
+
+  image:
+    name: quay.io/openshift/origin-cli:latest
+    entrypoint: [""]
+
+  needs:
+    - job: publish_docker_image
+      artifacts: false
+
+  variables:
+    GIT_STRATEGY: none
+
+  script:
+    - |
+      : "${OPENSHIFT_SERVER:?Set OPENSHIFT_SERVER in GitLab CI/CD variables}"
+      : "${OPENSHIFT_TOKEN:?Set OPENSHIFT_TOKEN in GitLab CI/CD variables}"
+      : "${OPENSHIFT_NAMESPACE:?Set OPENSHIFT_NAMESPACE in GitLab CI/CD variables}"
+    - oc login --server="$OPENSHIFT_SERVER" --token="$OPENSHIFT_TOKEN"
+    - IMAGE_NAME="docker.io/$DOCKERHUB_USERNAME/$DOCKERHUB_REPOSITORY"
+    - oc --namespace="$OPENSHIFT_NAMESPACE" set image "deployment/$OPENSHIFT_DEPLOYMENT" "$OPENSHIFT_CONTAINER=$IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
+    - oc --namespace="$OPENSHIFT_NAMESPACE" rollout status "deployment/$OPENSHIFT_DEPLOYMENT" --timeout=5m
+
+  environment:
+    name: production
+
+  resource_group: production
+
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
