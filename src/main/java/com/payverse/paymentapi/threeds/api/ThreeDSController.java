@@ -5,6 +5,8 @@ import com.payverse.paymentapi.threeds.model.ThreeDSEnrollmentRequest;
 import com.payverse.paymentapi.threeds.model.ThreeDSEnrollmentResponse;
 import com.payverse.paymentapi.threeds.model.ThreeDSSetupRequest;
 import com.payverse.paymentapi.threeds.model.ThreeDSSetupResponse;
+import com.payverse.paymentapi.threeds.model.ThreeDSValidationRequest;
+import com.payverse.paymentapi.threeds.model.ThreeDSValidationResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
@@ -33,5 +35,10 @@ public class ThreeDSController {
             @Valid @RequestBody ThreeDSEnrollmentRequest request,
             HttpServletRequest httpRequest) {
         return ResponseEntity.ok(threeDSService.enroll(request, httpRequest.getRemoteAddr()));
+    }
+
+    @PostMapping("/validation")
+    public ResponseEntity<ThreeDSValidationResponse> validate(@Valid @RequestBody ThreeDSValidationRequest request) {
+        return ResponseEntity.ok(threeDSService.validate(request));
     }
 }

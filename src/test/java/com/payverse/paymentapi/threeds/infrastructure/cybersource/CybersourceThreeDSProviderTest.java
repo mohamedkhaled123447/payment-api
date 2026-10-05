@@ -2,10 +2,13 @@ package com.payverse.paymentapi.threeds.infrastructure.cybersource;
 
 import Model.CheckPayerAuthEnrollmentRequest;
 import Model.PayerAuthSetupRequest;
+import Model.RiskV1AuthenticationResultsPost201Response;
+import Model.RiskV1AuthenticationResultsPost201ResponseConsumerAuthenticationInformation;
 import Model.RiskV1AuthenticationSetupsPost201Response;
 import Model.RiskV1AuthenticationSetupsPost201ResponseConsumerAuthenticationInformation;
 import Model.RiskV1AuthenticationsPost201Response;
 import Model.RiskV1DecisionsPost201ResponseConsumerAuthenticationInformation;
+import Model.ValidateRequest;
 import com.payverse.paymentapi.threeds.application.ThreeDSProviderException;
 import com.payverse.paymentapi.threeds.model.ThreeDSBillTo;
 import com.payverse.paymentapi.threeds.model.ThreeDSBrowser;
@@ -15,6 +18,9 @@ import com.payverse.paymentapi.threeds.model.ThreeDSEnrollmentOutcome;
 import com.payverse.paymentapi.threeds.model.ThreeDSEnrollmentResult;
 import com.payverse.paymentapi.threeds.model.ThreeDSSetupRequest;
 import com.payverse.paymentapi.threeds.model.ThreeDSSetupResponse;
+import com.payverse.paymentapi.threeds.model.ThreeDSValidationCommand;
+import com.payverse.paymentapi.threeds.model.ThreeDSValidationOutcome;
+import com.payverse.paymentapi.threeds.model.ThreeDSValidationResult;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -22,6 +28,7 @@ import java.math.BigDecimal;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -225,5 +232,109 @@ class CybersourceThreeDSProviderTest {
                 .thenThrow(new CybersourceClientException("Cybersource error", new RuntimeException()));
 
         assertThrows(ThreeDSProviderException.class, () -> enrollmentProvider.enroll(command("4111111111111111")));
+    }
+
+    private ThreeDSValidationCommand validationCommand(String cardNumber) {
+        return new ThreeDSValidationCommand(
+                UUID.fromString("7f0c1f5e-0000-4000-8000-000000000001"),
+                "auth-tx",
+                new ThreeDSCard(cardNumber, "12", "2028"),
+                new BigDecimal("49.90"),
+                "USD");
+    }
+
+    private RiskV1AuthenticationResultsPost201Response validationResponse(
+            String status, RiskV1AuthenticationResultsPost201ResponseConsumerAuthenticationInformation info) {
+        return new RiskV1AuthenticationResultsPost201Response().status(status).consumerAuthenticationInformation(info);
+    }
+
+    @Test
+    void mapsTheValidationRequest() {
+        when(enrollmentClient.validateAuthentication(any())).thenReturn(validationResponse(
+                "AUTHENTICATION_SUCCESSFUL",
+                new RiskV1AuthenticationResultsPost201ResponseConsumerAuthenticationInformation().cavv("cavv")));
+
+        enrollmentProvider.validate(validationCommand("4111111111111111"));
+
+        ArgumentCaptor<ValidateRequest> captor = ArgumentCaptor.forClass(ValidateRequest.class);
+        verify(enrollmentClient).validateAuthentication(captor.capture());
+        ValidateRequest request = captor.getValue();
+        assertEquals("7f0c1f5e-0000-4000-8000-000000000001", request.getClientReferenceInformation().getCode());
+        assertEquals("auth-tx", request.getConsumerAuthenticationInformation().getAuthenticationTransactionId());
+        assertEquals("001", request.getPaymentInformation().getCard().getType());
+        assertEquals("4111111111111111", request.getPaymentInformation().getCard().getNumber());
+        assertEquals("12", request.getPaymentInformation().getCard().getExpirationMonth());
+        assertEquals("2028", request.getPaymentInformation().getCard().getExpirationYear());
+        assertEquals("USD", request.getOrderInformation().getAmountDetails().getCurrency());
+        assertEquals("49.90", request.getOrderInformation().getAmountDetails().getTotalAmount());
+    }
+
+    @Test
+    void mapsASuccessfulValidation() {
+        when(enrollmentClient.validateAuthentication(any())).thenReturn(validationResponse(
+                "AUTHENTICATION_SUCCESSFUL",
+                new RiskV1AuthenticationResultsPost201ResponseConsumerAuthenticationInformation()
+                        .cavv("cavv-value").eci("05").indicator("vbv").xid("xid-value")
+                        .specificationVersion("2.2.0").directoryServerTransactionId("ds-tx")));
+
+        ThreeDSValidationResult result = enrollmentProvider.validate(validationCommand("4111111111111111"));
+
+        assertEquals(new ThreeDSValidationResult(
+                ThreeDSValidationOutcome.AUTHENTICATED, "cavv-value", "05", "vbv", "xid-value", "2.2.0", "ds-tx"),
+                result);
+    }
+
+    @Test
+    void usesTheUcafAuthenticationDataWhenValidationHasNoCavv() {
+        when(enrollmentClient.validateAuthentication(any())).thenReturn(validationResponse(
+                "AUTHENTICATION_SUCCESSFUL",
+                new RiskV1AuthenticationResultsPost201ResponseConsumerAuthenticationInformation()
+                        .ucafAuthenticationData("ucaf-value").eci("02")));
+
+        ThreeDSValidationResult result = enrollmentProvider.validate(validationCommand("5555555555554444"));
+
+        assertEquals(ThreeDSValidationOutcome.AUTHENTICATED, result.outcome());
+        assertEquals("ucaf-value", result.authenticationValue());
+    }
+
+    @Test
+    void mapsAFailedValidation() {
+        when(enrollmentClient.validateAuthentication(any()))
+                .thenReturn(validationResponse("AUTHENTICATION_FAILED", null));
+
+        ThreeDSValidationResult result = enrollmentProvider.validate(validationCommand("4111111111111111"));
+
+        assertEquals(ThreeDSValidationOutcome.FAILED, result.outcome());
+        assertNull(result.authenticationValue());
+    }
+
+    @Test
+    void rejectsASuccessfulValidationWithoutAnAuthenticationValue() {
+        when(enrollmentClient.validateAuthentication(any()))
+                .thenReturn(validationResponse("AUTHENTICATION_SUCCESSFUL", null))
+                .thenReturn(validationResponse(
+                        "AUTHENTICATION_SUCCESSFUL",
+                        new RiskV1AuthenticationResultsPost201ResponseConsumerAuthenticationInformation().eci("05")));
+
+        assertThrows(ThreeDSProviderException.class, () -> enrollmentProvider.validate(validationCommand("4111111111111111")));
+        assertThrows(ThreeDSProviderException.class, () -> enrollmentProvider.validate(validationCommand("4111111111111111")));
+    }
+
+    @Test
+    void rejectsAnUnacceptedOrEmptyValidationResponse() {
+        when(enrollmentClient.validateAuthentication(any()))
+                .thenReturn(validationResponse("INVALID_REQUEST", null))
+                .thenReturn(null);
+
+        assertThrows(ThreeDSProviderException.class, () -> enrollmentProvider.validate(validationCommand("4111111111111111")));
+        assertThrows(ThreeDSProviderException.class, () -> enrollmentProvider.validate(validationCommand("4111111111111111")));
+    }
+
+    @Test
+    void mapsValidationClientErrorsToProviderErrors() {
+        when(enrollmentClient.validateAuthentication(any()))
+                .thenThrow(new CybersourceClientException("Cybersource error", new RuntimeException()));
+
+        assertThrows(ThreeDSProviderException.class, () -> enrollmentProvider.validate(validationCommand("4111111111111111")));
     }
 }

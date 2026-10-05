@@ -2,6 +2,8 @@ package com.payverse.paymentapi.threeds.infrastructure.cybersource;
 
 import Model.CheckPayerAuthEnrollmentRequest;
 import Model.PayerAuthSetupRequest;
+import Model.RiskV1AuthenticationResultsPost201Response;
+import Model.RiskV1AuthenticationResultsPost201ResponseConsumerAuthenticationInformation;
 import Model.RiskV1AuthenticationSetupsPost201Response;
 import Model.RiskV1AuthenticationSetupsPost201ResponseConsumerAuthenticationInformation;
 import Model.RiskV1AuthenticationsPost201Response;
@@ -10,11 +12,17 @@ import Model.Riskv1authenticationsDeviceInformation;
 import Model.Riskv1authenticationsOrderInformation;
 import Model.Riskv1authenticationsOrderInformationAmountDetails;
 import Model.Riskv1authenticationsOrderInformationBillTo;
+import Model.Riskv1authenticationresultsConsumerAuthenticationInformation;
+import Model.Riskv1authenticationresultsOrderInformation;
+import Model.Riskv1authenticationresultsOrderInformationAmountDetails;
+import Model.Riskv1authenticationresultsPaymentInformation;
+import Model.Riskv1authenticationresultsPaymentInformationCard;
 import Model.Riskv1authenticationsPaymentInformation;
 import Model.Riskv1authenticationsetupsPaymentInformation;
 import Model.Riskv1authenticationsetupsPaymentInformationCard;
 import Model.Riskv1decisionsClientReferenceInformation;
 import Model.Riskv1decisionsConsumerAuthenticationInformation;
+import Model.ValidateRequest;
 import com.payverse.paymentapi.threeds.application.ThreeDSProvider;
 import com.payverse.paymentapi.threeds.application.ThreeDSProviderException;
 import com.payverse.paymentapi.threeds.model.ThreeDSBillTo;
@@ -24,6 +32,9 @@ import com.payverse.paymentapi.threeds.model.ThreeDSEnrollmentOutcome;
 import com.payverse.paymentapi.threeds.model.ThreeDSEnrollmentResult;
 import com.payverse.paymentapi.threeds.model.ThreeDSSetupRequest;
 import com.payverse.paymentapi.threeds.model.ThreeDSSetupResponse;
+import com.payverse.paymentapi.threeds.model.ThreeDSValidationCommand;
+import com.payverse.paymentapi.threeds.model.ThreeDSValidationOutcome;
+import com.payverse.paymentapi.threeds.model.ThreeDSValidationResult;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -53,6 +64,17 @@ public class CybersourceThreeDSProvider implements ThreeDSProvider {
             return toEnrollmentResult(response);
         } catch (CybersourceClientException exception) {
             throw new ThreeDSProviderException("3DS enrollment check failed", exception);
+        }
+    }
+
+    @Override
+    public ThreeDSValidationResult validate(ThreeDSValidationCommand command) {
+        try {
+            RiskV1AuthenticationResultsPost201Response response =
+                    cybersourceClient.validateAuthentication(toValidationRequest(command));
+            return toValidationResult(response);
+        } catch (CybersourceClientException exception) {
+            throw new ThreeDSProviderException("3DS authentication validation failed", exception);
         }
     }
 
@@ -184,6 +206,64 @@ public class CybersourceThreeDSProvider implements ThreeDSProvider {
                 info.getSpecificationVersion(),
                 info.getDirectoryServerTransactionId(),
                 info.getVeresEnrolled());
+    }
+
+    private ValidateRequest toValidationRequest(ThreeDSValidationCommand command) {
+        Riskv1authenticationresultsPaymentInformationCard card = new Riskv1authenticationresultsPaymentInformationCard()
+                .type(cardType(command.card().number()))
+                .number(command.card().number())
+                .expirationMonth(command.card().expirationMonth())
+                .expirationYear(command.card().expirationYear());
+
+        return new ValidateRequest()
+                .clientReferenceInformation(new Riskv1decisionsClientReferenceInformation()
+                        .code(command.paymentId().toString()))
+                .paymentInformation(new Riskv1authenticationresultsPaymentInformation().card(card))
+                .orderInformation(new Riskv1authenticationresultsOrderInformation()
+                        .amountDetails(new Riskv1authenticationresultsOrderInformationAmountDetails()
+                                .currency(command.currency())
+                                .totalAmount(command.amount().toPlainString())))
+                .consumerAuthenticationInformation(new Riskv1authenticationresultsConsumerAuthenticationInformation()
+                        .authenticationTransactionId(command.authenticationTransactionId()));
+    }
+
+    private ThreeDSValidationResult toValidationResult(RiskV1AuthenticationResultsPost201Response response) {
+        if (response == null || response.getStatus() == null) {
+            throw new ThreeDSProviderException("Cybersource validation response is incomplete");
+        }
+        RiskV1AuthenticationResultsPost201ResponseConsumerAuthenticationInformation info =
+                response.getConsumerAuthenticationInformation();
+
+        return switch (response.getStatus()) {
+            case "AUTHENTICATION_SUCCESSFUL" -> {
+                if (info == null || authenticationValue(info) == null) {
+                    throw new ThreeDSProviderException("Cybersource validation response is incomplete");
+                }
+                yield validationResult(ThreeDSValidationOutcome.AUTHENTICATED, info);
+            }
+            case "AUTHENTICATION_FAILED" -> validationResult(ThreeDSValidationOutcome.FAILED, info);
+            default -> throw new ThreeDSProviderException("Cybersource validation request was not accepted");
+        };
+    }
+
+    private ThreeDSValidationResult validationResult(
+            ThreeDSValidationOutcome outcome,
+            RiskV1AuthenticationResultsPost201ResponseConsumerAuthenticationInformation info) {
+        if (info == null) {
+            return new ThreeDSValidationResult(outcome, null, null, null, null, null, null);
+        }
+        return new ThreeDSValidationResult(
+                outcome,
+                authenticationValue(info),
+                info.getEci(),
+                info.getIndicator(),
+                info.getXid(),
+                info.getSpecificationVersion(),
+                info.getDirectoryServerTransactionId());
+    }
+
+    private String authenticationValue(RiskV1AuthenticationResultsPost201ResponseConsumerAuthenticationInformation info) {
+        return info.getCavv() != null ? info.getCavv() : info.getUcafAuthenticationData();
     }
 
     // Visa/Amex return a CAVV; Mastercard returns the UCAF authentication data instead.

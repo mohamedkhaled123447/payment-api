@@ -10,22 +10,36 @@ import com.payverse.paymentapi.threeds.model.ThreeDSEnrollmentResponse;
 import com.payverse.paymentapi.threeds.model.ThreeDSEnrollmentResult;
 import com.payverse.paymentapi.threeds.model.ThreeDSSetupRequest;
 import com.payverse.paymentapi.threeds.model.ThreeDSSetupResponse;
+import com.payverse.paymentapi.threeds.model.ThreeDSValidationCommand;
+import com.payverse.paymentapi.threeds.model.ThreeDSValidationOutcome;
+import com.payverse.paymentapi.threeds.model.ThreeDSValidationRequest;
+import com.payverse.paymentapi.threeds.model.ThreeDSValidationResponse;
+import com.payverse.paymentapi.threeds.model.ThreeDSValidationResult;
 import com.payverse.paymentapi.threeds.persistence.ThreeDSProviderType;
 import com.payverse.paymentapi.threeds.persistence.ThreeDSSession;
 import com.payverse.paymentapi.threeds.persistence.ThreeDSSessionRepository;
 import com.payverse.paymentapi.threeds.persistence.ThreeDSSessionStatus;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.dao.OptimisticLockingFailureException;
 
 import java.math.BigDecimal;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -38,7 +52,7 @@ class ThreeDSServiceTest {
     void setupPersistsTheProviderSessionAndReturnsAGeneratedPaymentId() {
         ThreeDSProvider provider = mock(ThreeDSProvider.class);
         ThreeDSSessionRepository repository = mock(ThreeDSSessionRepository.class);
-        ThreeDSService service = new ThreeDSService(provider, repository);
+        ThreeDSService service = new ThreeDSService(provider, repository, CLAIM_TIMEOUT);
         ThreeDSSetupRequest request = new ThreeDSSetupRequest(
                 new ThreeDSCard("4111111111111111", "12", "2028"));
         ThreeDSSetupResponse providerResponse = new ThreeDSSetupResponse(
@@ -68,7 +82,7 @@ class ThreeDSServiceTest {
     void setupDoesNotPersistASessionWhenTheProviderFails() {
         ThreeDSProvider provider = mock(ThreeDSProvider.class);
         ThreeDSSessionRepository repository = mock(ThreeDSSessionRepository.class);
-        ThreeDSService service = new ThreeDSService(provider, repository);
+        ThreeDSService service = new ThreeDSService(provider, repository, CLAIM_TIMEOUT);
         ThreeDSSetupRequest request = new ThreeDSSetupRequest(
                 new ThreeDSCard("4111111111111111", "12", "2028"));
         when(provider.setup(request)).thenThrow(new ThreeDSProviderException("Cybersource setup failed"));
@@ -80,10 +94,11 @@ class ThreeDSServiceTest {
     }
 
     private static final UUID PAYMENT_ID = UUID.randomUUID();
+    private static final Duration CLAIM_TIMEOUT = Duration.ofMinutes(2);
 
     private final ThreeDSProvider provider = mock(ThreeDSProvider.class);
     private final ThreeDSSessionRepository repository = mock(ThreeDSSessionRepository.class);
-    private final ThreeDSService service = new ThreeDSService(provider, repository);
+    private final ThreeDSService service = new ThreeDSService(provider, repository, CLAIM_TIMEOUT);
 
     private ThreeDSEnrollmentRequest enrollmentRequest() {
         return new ThreeDSEnrollmentRequest(
@@ -204,5 +219,200 @@ class ThreeDSServiceTest {
 
         assertEquals(ThreeDSSessionStatus.SETUP_COMPLETED, session.getStatus());
         verify(repository, never()).save(any());
+    }
+
+    // --- validation ---
+
+    // Status of the session at each save(), in order. Lets the tests assert the claim happens
+    // before the provider call and the result after it.
+    private final List<ThreeDSSessionStatus> savedStatuses = new ArrayList<>();
+
+    @BeforeEach
+    void saveReturnsTheEntityAndRecordsItsStatus() {
+        when(repository.save(any())).thenAnswer(invocation -> {
+            ThreeDSSession saved = invocation.getArgument(0);
+            savedStatuses.add(saved.getStatus());
+            return saved;
+        });
+    }
+
+    private ThreeDSValidationRequest validationRequest() {
+        return new ThreeDSValidationRequest(PAYMENT_ID, new ThreeDSCard("4111111111111111", "12", "2028"));
+    }
+
+    private ThreeDSSession challengedSession() {
+        ThreeDSSession session = session(ThreeDSSessionStatus.CHALLENGE_REQUIRED);
+        session.setAuthenticationTransactionId("auth-tx-id");
+        session.setAmount(new BigDecimal("49.90"));
+        session.setCurrency("USD");
+        return session;
+    }
+
+    private ThreeDSValidationResult validationResult(ThreeDSValidationOutcome outcome) {
+        return new ThreeDSValidationResult(outcome, "validated-cavv", "05", "vbv", "validated-xid", "2.2.0", "ds-tx-id");
+    }
+
+    @Test
+    void validateClaimsTheSessionBeforeCallingTheProviderThenAuthenticatesIt() {
+        ThreeDSSession session = challengedSession();
+        when(repository.findByPaymentId(PAYMENT_ID)).thenReturn(Optional.of(session));
+        when(provider.validate(any())).thenReturn(validationResult(ThreeDSValidationOutcome.AUTHENTICATED));
+
+        ThreeDSValidationResponse response = service.validate(validationRequest());
+
+        assertEquals(new ThreeDSValidationResponse(PAYMENT_ID, ThreeDSValidationOutcome.AUTHENTICATED), response);
+        assertEquals(List.of(ThreeDSSessionStatus.VALIDATING, ThreeDSSessionStatus.AUTHENTICATED), savedStatuses);
+        assertEquals("validated-cavv", session.getAuthenticationValue());
+        assertEquals("05", session.getEci());
+        assertEquals("validated-xid", session.getXid());
+    }
+
+    @Test
+    void validateSendsTheSessionTransactionIdAmountAndCurrencyWithTheRequestCard() {
+        when(repository.findByPaymentId(PAYMENT_ID)).thenReturn(Optional.of(challengedSession()));
+        when(provider.validate(any())).thenReturn(validationResult(ThreeDSValidationOutcome.AUTHENTICATED));
+
+        service.validate(validationRequest());
+
+        ArgumentCaptor<ThreeDSValidationCommand> captor = ArgumentCaptor.forClass(ThreeDSValidationCommand.class);
+        verify(provider).validate(captor.capture());
+        ThreeDSValidationCommand command = captor.getValue();
+        assertEquals(PAYMENT_ID, command.paymentId());
+        assertEquals("auth-tx-id", command.authenticationTransactionId());
+        assertEquals(new BigDecimal("49.90"), command.amount());
+        assertEquals("USD", command.currency());
+        assertEquals("4111111111111111", command.card().number());
+    }
+
+    @Test
+    void validateRecordsAFailedAuthenticationWithoutStoringAuthenticationValues() {
+        ThreeDSSession session = challengedSession();
+        when(repository.findByPaymentId(PAYMENT_ID)).thenReturn(Optional.of(session));
+        when(provider.validate(any())).thenReturn(validationResult(ThreeDSValidationOutcome.FAILED));
+
+        ThreeDSValidationResponse response = service.validate(validationRequest());
+
+        assertEquals(ThreeDSValidationOutcome.FAILED, response.outcome());
+        assertEquals(List.of(ThreeDSSessionStatus.VALIDATING, ThreeDSSessionStatus.AUTHENTICATION_FAILED), savedStatuses);
+        assertNull(session.getAuthenticationValue());
+    }
+
+    @Test
+    void validateKeepsEnrollmentValuesThatTheValidationResponseOmits() {
+        ThreeDSSession session = challengedSession();
+        session.setSpecificationVersion("2.1.0");
+        session.setDirectoryServerTransactionId("enrollment-ds-tx");
+        when(repository.findByPaymentId(PAYMENT_ID)).thenReturn(Optional.of(session));
+        when(provider.validate(any())).thenReturn(new ThreeDSValidationResult(
+                ThreeDSValidationOutcome.AUTHENTICATED, "validated-cavv", "05", null, "xid", null, null));
+
+        service.validate(validationRequest());
+
+        assertEquals("2.1.0", session.getSpecificationVersion());
+        assertEquals("enrollment-ds-tx", session.getDirectoryServerTransactionId());
+    }
+
+    @Test
+    void validateReturnsTheStoredResultOfAFinishedValidationWithoutCallingTheProvider() {
+        when(repository.findByPaymentId(PAYMENT_ID))
+                .thenReturn(Optional.of(session(ThreeDSSessionStatus.AUTHENTICATED)))
+                .thenReturn(Optional.of(session(ThreeDSSessionStatus.AUTHENTICATION_FAILED)));
+
+        assertEquals(ThreeDSValidationOutcome.AUTHENTICATED, service.validate(validationRequest()).outcome());
+        assertEquals(ThreeDSValidationOutcome.FAILED, service.validate(validationRequest()).outcome());
+
+        verifyNoInteractions(provider);
+        verify(repository, never()).save(any());
+    }
+
+    @Test
+    void validateRejectsAnUnknownPayment() {
+        when(repository.findByPaymentId(PAYMENT_ID)).thenReturn(Optional.empty());
+
+        assertThrows(ThreeDSSessionNotFoundException.class, () -> service.validate(validationRequest()));
+
+        verifyNoInteractions(provider);
+    }
+
+    @Test
+    void validateRejectsASessionThatHasNotBeenChallenged() {
+        when(repository.findByPaymentId(PAYMENT_ID))
+                .thenReturn(Optional.of(session(ThreeDSSessionStatus.SETUP_COMPLETED)))
+                .thenReturn(Optional.of(session(ThreeDSSessionStatus.AUTHENTICATION_UNAVAILABLE)));
+
+        assertThrows(ThreeDSInvalidStateException.class, () -> service.validate(validationRequest()));
+        assertThrows(ThreeDSInvalidStateException.class, () -> service.validate(validationRequest()));
+
+        verifyNoInteractions(provider);
+        verify(repository, never()).save(any());
+    }
+
+    @Test
+    void validateRejectsARequestWhileAnotherValidationIsInFlight() {
+        ThreeDSSession session = session(ThreeDSSessionStatus.VALIDATING);
+        session.setUpdatedAt(Instant.now());
+        when(repository.findByPaymentId(PAYMENT_ID)).thenReturn(Optional.of(session));
+
+        assertThrows(ThreeDSInvalidStateException.class, () -> service.validate(validationRequest()));
+
+        verifyNoInteractions(provider);
+        verify(repository, never()).save(any());
+    }
+
+    @Test
+    void validateReclaimsAClaimThatHasExpired() {
+        ThreeDSSession session = challengedSession();
+        session.setStatus(ThreeDSSessionStatus.VALIDATING);
+        session.setUpdatedAt(Instant.now().minus(CLAIM_TIMEOUT).minusSeconds(60));
+        when(repository.findByPaymentId(PAYMENT_ID)).thenReturn(Optional.of(session));
+        when(provider.validate(any())).thenReturn(validationResult(ThreeDSValidationOutcome.AUTHENTICATED));
+
+        ThreeDSValidationResponse response = service.validate(validationRequest());
+
+        assertEquals(ThreeDSValidationOutcome.AUTHENTICATED, response.outcome());
+        // The stale claim is released with a real change first, then claimed again, then finished.
+        assertEquals(List.of(
+                ThreeDSSessionStatus.CHALLENGE_REQUIRED,
+                ThreeDSSessionStatus.VALIDATING,
+                ThreeDSSessionStatus.AUTHENTICATED), savedStatuses);
+    }
+
+    @Test
+    void validateDoesNotCallTheProviderWhenAnotherRequestWinsTheClaim() {
+        when(repository.findByPaymentId(PAYMENT_ID)).thenReturn(Optional.of(challengedSession()));
+        doThrow(new OptimisticLockingFailureException("claimed by another request")).when(repository).save(any());
+
+        assertThrows(OptimisticLockingFailureException.class, () -> service.validate(validationRequest()));
+
+        verifyNoInteractions(provider);
+    }
+
+    @Test
+    void validateReleasesTheClaimWhenTheProviderFails() {
+        ThreeDSSession session = challengedSession();
+        when(repository.findByPaymentId(PAYMENT_ID)).thenReturn(Optional.of(session));
+        when(provider.validate(any())).thenThrow(new ThreeDSProviderException("boom"));
+
+        assertThrows(ThreeDSProviderException.class, () -> service.validate(validationRequest()));
+
+        assertEquals(List.of(ThreeDSSessionStatus.VALIDATING, ThreeDSSessionStatus.CHALLENGE_REQUIRED), savedStatuses);
+        assertEquals(ThreeDSSessionStatus.CHALLENGE_REQUIRED, session.getStatus());
+    }
+
+    @Test
+    void validateReportsTheProviderFailureEvenWhenReleasingTheClaimFails() {
+        when(repository.findByPaymentId(PAYMENT_ID)).thenReturn(Optional.of(challengedSession()));
+        ThreeDSProviderException providerFailure = new ThreeDSProviderException("boom");
+        when(provider.validate(any())).thenThrow(providerFailure);
+        OptimisticLockingFailureException releaseFailure = new OptimisticLockingFailureException("release failed");
+        doAnswer(invocation -> invocation.getArgument(0))
+                .doThrow(releaseFailure)
+                .when(repository).save(any());
+
+        ThreeDSProviderException thrown =
+                assertThrows(ThreeDSProviderException.class, () -> service.validate(validationRequest()));
+
+        assertSame(providerFailure, thrown);
+        assertSame(releaseFailure, thrown.getSuppressed()[0]);
     }
 }

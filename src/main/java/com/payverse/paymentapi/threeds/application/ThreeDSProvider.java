@@ -4,10 +4,14 @@ import com.payverse.paymentapi.threeds.model.ThreeDSEnrollmentCommand;
 import com.payverse.paymentapi.threeds.model.ThreeDSEnrollmentResult;
 import com.payverse.paymentapi.threeds.model.ThreeDSSetupRequest;
 import com.payverse.paymentapi.threeds.model.ThreeDSSetupResponse;
+import com.payverse.paymentapi.threeds.model.ThreeDSValidationCommand;
+import com.payverse.paymentapi.threeds.model.ThreeDSValidationResult;
 
 public interface ThreeDSProvider {
 
     ThreeDSSetupResponse setup(ThreeDSSetupRequest request);
 
     ThreeDSEnrollmentResult enroll(ThreeDSEnrollmentCommand command);
+
+    ThreeDSValidationResult validate(ThreeDSValidationCommand command);
 }

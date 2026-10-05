@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3DS End-to-End Test</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1c2330; --muted: #5d6877; --border: #d9dee6;
+    --accent: #2455d6; --ok: #137a3f; --warn: #a15c00; --bad: #b3261e; --code-bg: #0f1520; --code-text: #d7e0ee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12161d; --panel: #1a202a; --text: #e6eaf1; --muted: #9aa5b5; --border: #2b3441;
+      --accent: #6c97ff; --ok: #4cc27f; --warn: #e6a23c; --bad: #ff7a70; --code-bg: #0b0f16; --code-text: #cfd8e6;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  p.lead { margin: 0 0 20px; color: var(--muted); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+  input, select { width: 100%; padding: 8px 10px; margin-top: 4px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+  .row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  button { padding: 9px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  ol.steps { list-style: none; margin: 0; padding: 0; }
+  ol.steps li { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border); }
+  ol.steps li:last-child { border-bottom: 0; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--border); flex: none; }
+  li[data-state="running"] .dot { background: var(--warn); }
+  li[data-state="done"] .dot { background: var(--ok); }
+  li[data-state="error"] .dot { background: var(--bad); }
+  li[data-state="skipped"] .dot { background: transparent; border: 2px solid var(--border); }
+  .step-note { margin-left: auto; font-size: 12px; color: var(--muted); text-align: right; }
+  #result { font-size: 18px; font-weight: 600; margin: 4px 0 0; }
+  #result.ok { color: var(--ok); } #result.bad { color: var(--bad); }
+  #challengeBox { display: none; }
+  #challengeFrame { width: 100%; max-width: 420px; height: 600px; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+  pre#log { background: var(--code-bg); color: var(--code-text); padding: 12px; border-radius: 8px; max-height: 460px; overflow: auto; font: 12px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word; margin: 0; }
+  .note { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  code { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>3DS end-to-end test</h1>
+  <p class="lead">Runs setup, device data collection, enrollment, the bank challenge and validation against this API. Origin of this page: <code id="originLabel"></code></p>
+
+  <div class="grid">
+    <section>
+      <div class="panel">
+        <h2>API</h2>
+        <label>API base URL <input id="apiBase" placeholder="http://localhost:8080" autocomplete="off"></label>
+        <p class="note" id="apiBaseNote"></p>
+      </div>
+
+      <div class="panel">
+        <h2>Card</h2>
+        <label>Test card preset
+          <select id="preset">
+            <option value="">Custom</option>
+            <option value="4000000000001000">Visa, frictionless (4000000000001000)</option>
+            <option value="4000000000001091">Visa, challenge (4000000000001091)</option>
+            <option value="5200000000001005">Mastercard, frictionless (5200000000001005)</option>
+            <option value="5200000000001096">Mastercard, challenge (5200000000001096)</option>
+          </select>
+        </label>
+        <p class="note">Presets are the commonly used Cardinal sandbox cards. Check them against Cybersource's current test-card list for your account.</p>
+        <label>Card number <input id="number" value="4000000000001091" autocomplete="off"></label>
+        <div class="row">
+          <label>Exp. month <input id="expMonth" value="12"></label>
+          <label>Exp. year <input id="expYear"></label>
+          <label>Currency <input id="currency" value="USD" maxlength="3"></label>
+        </div>
+        <label>Amount <input id="amount" value="49.90"></label>
+      </div>
+
+      <div class="panel">
+        <h2>Bill to</h2>
+        <div class="row2">
+          <label>First name <input id="firstName" value="Ann"></label>
+          <label>Last name <input id="lastName" value="Lee"></label>
+        </div>
+        <label>Email <input id="email" value="ann@example.com"></label>
+        <label>Address <input id="address1" value="1 Market St"></label>
+        <div class="row">
+          <label>City <input id="locality" value="San Francisco"></label>
+          <label>State <input id="administrativeArea" value="CA"></label>
+          <label>Postal code <input id="postalCode" value="94105"></label>
+        </div>
+        <label>Country (2 letters) <input id="country" value="US" maxlength="2"></label>
+      </div>
+
+      <div class="actions">
+        <button class="primary" id="run">Run 3DS flow</button>
+        <button id="validateBtn" disabled>Call validation now</button>
+        <button id="reset">Reset</button>
+      </div>
+      <p class="note">"Call validation now" works once enrollment returned a challenge. Click it before finishing the challenge to see a failure, or after a result to see the stored answer returned again.</p>
+    </section>
+
+    <section>
+      <div class="panel">
+        <h2>Progress</h2>
+        <ol class="steps" id="steps">
+          <li data-step="setup"><span class="dot"></span>1. Setup <span class="step-note"></span></li>
+          <li data-step="ddc"><span class="dot"></span>2. Device data collection <span class="step-note"></span></li>
+          <li data-step="enroll"><span class="dot"></span>3. Enrollment check <span class="step-note"></span></li>
+          <li data-step="challenge"><span class="dot"></span>4. Bank challenge <span class="step-note"></span></li>
+          <li data-step="validate"><span class="dot"></span>5. Validation <span class="step-note"></span></li>
+        </ol>
+        <p id="result"></p>
+      </div>
+
+      <div class="panel" id="challengeBox">
+        <h2>Bank challenge</h2>
+        <iframe id="challengeFrame" name="challengeFrame" title="3DS challenge"></iframe>
+      </div>
+
+      <div class="panel">
+        <h2>Log</h2>
+        <pre id="log"></pre>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+(function () {
+  'use strict';
+  const API_PATH = '/api/v1/3ds';
+  const BASE_KEY = '3ds-test.apiBase';
+  const $ = (id) => document.getElementById(id);
+  const state = { paymentId: null, validating: false, awaitingChallenge: false };
+
+  // ---------- API base URL (defaults to the origin serving this page) ----------
+  function storedBase() {
+    try { return localStorage.getItem(BASE_KEY); } catch (e) { return null; }
+  }
+  function storeBase(value) {
+    try { localStorage.setItem(BASE_KEY, value); } catch (e) { /* storage unavailable */ }
+  }
+  // Returns the base URL without a trailing slash, or throws if it is not a valid http(s) URL.
+  function apiBase() {
+    const raw = $('apiBase').value.trim() || location.origin;
+    let url;
+    try { url = new URL(raw); } catch (e) { throw new Error('API base URL is not a valid URL: ' + raw); }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('API base URL must start with http:// or https://');
+    return raw.replace(/\/+$/, '');
+  }
+  function apiOrigin() { return new URL(apiBase()).origin; }
+  function apiUrl(path) { return apiBase() + API_PATH + path; }
+
+  function updateBaseNote() {
+    const note = $('apiBaseNote');
+    let origin;
+    try { origin = apiOrigin(); } catch (e) { note.textContent = e.message; return; }
+    note.textContent = origin === location.origin
+      ? 'Same origin as this page, so no CORS setup is needed.'
+      : 'Different origin from this page (' + location.origin + '). The API must allow CORS from this page, and threeds.frontend-origin on the API must be ' + location.origin + '.';
+  }
+
+  $('apiBase').value = storedBase() || location.origin;
+  $('apiBase').addEventListener('input', () => { storeBase($('apiBase').value.trim()); updateBaseNote(); });
+  updateBaseNote();
+
+  $('originLabel').textContent = location.origin;
+  $('expYear').value = String(new Date().getFullYear() + 2);
+  $('preset').addEventListener('change', (e) => { if (e.target.value) $('number').value = e.target.value; });
+
+  // ---------- logging (never prints the full card number or tokens) ----------
+  function redact(value) {
+    return JSON.parse(JSON.stringify(value, (key, v) => {
+      if (key === 'number' && typeof v === 'string') return v.slice(0, 6) + '******' + v.slice(-4);
+      if ((key === 'accessToken' || key === 'JWT') && typeof v === 'string') return v.slice(0, 12) + '...(' + v.length + ' chars)';
+      return v;
+    }));
+  }
+  function log(title, data) {
+    const time = new Date().toLocaleTimeString();
+    const body = data === undefined ? '' : '\n' + JSON.stringify(redact(data), null, 2);
+    const el = $('log');
+    el.textContent += '[' + time + '] ' + title + body + '\n\n';
+    el.scrollTop = el.scrollHeight;
+  }
+  function setStep(name, stateName, note) {
+    const li = document.querySelector('li[data-step="' + name + '"]');
+    li.dataset.state = stateName;
+    li.querySelector('.step-note').textContent = note || '';
+  }
+  function showResult(text, ok) {
+    const el = $('result');
+    el.textContent = text;
+    el.className = ok ? 'ok' : 'bad';
+  }
+
+  // ---------- API ----------
+  async function post(path, body) {
+    const url = apiUrl(path);
+    log('POST ' + url, body);
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const text = await response.text();
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch (e) { /* not JSON */ }
+    log('<- ' + response.status + ' ' + path, json || text);
+    if (!response.ok) {
+      const detail = json && json.detail ? json.detail : text || response.statusText;
+      const error = new Error(response.status + ': ' + detail);
+      error.status = response.status;
+      throw error;
+    }
+    return json;
+  }
+
+  function card() {
+    return { number: $('number').value.trim(), expirationMonth: $('expMonth').value.trim(), expirationYear: $('expYear').value.trim() };
+  }
+  function browserInfo() {
+    return {
+      acceptHeader: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      userAgent: navigator.userAgent,
+      language: navigator.language || 'en-US',
+      javaEnabled: typeof navigator.javaEnabled === 'function' ? navigator.javaEnabled() : false,
+      colorDepth: String(screen.colorDepth),
+      screenHeight: String(screen.height),
+      screenWidth: String(screen.width),
+      timeZoneOffset: String(new Date().getTimezoneOffset())
+    };
+  }
+
+  // ---------- browser-side steps ----------
+  function postFormToFrame(url, frameName, fields) {
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = url;
+    form.target = frameName;
+    form.style.display = 'none';
+    Object.entries(fields).forEach(([name, value]) => {
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = name;
+      input.value = value;
+      form.appendChild(input);
+    });
+    document.body.appendChild(form);
+    form.submit();
+    form.remove();
+  }
+
+  function deviceDataCollection(url, jwt) {
+    return new Promise((resolve) => {
+      const iframe = document.createElement('iframe');
+      iframe.name = 'ddcFrame';
+      iframe.style.display = 'none';
+      document.body.appendChild(iframe);
+      const ddcOrigin = new URL(url).origin;
+
+      function finish(reason) {
+        clearTimeout(timer);
+        window.removeEventListener('message', onMessage);
+        iframe.remove();
+        resolve(reason);
+      }
+      function onMessage(event) {
+        if (event.origin !== ddcOrigin) return;
+        let data = event.data;
+        if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { return; } }
+        if (data && data.MessageType === 'profile.completed') {
+          log('Device data collection message', data);
+          finish('completed');
+        }
+      }
+      // Cybersource advises continuing after ~10 seconds even if no message arrives.
+      const timer = setTimeout(() => finish('timed out, continuing'), 10000);
+      window.addEventListener('message', onMessage);
+      postFormToFrame(url, 'ddcFrame', { JWT: jwt });
+    });
+  }
+
+  // The callback page is served by the API, so its message comes from the API's origin.
+  window.addEventListener('message', (event) => {
+    let expected;
+    try { expected = apiOrigin(); } catch (e) { return; }
+    if (event.origin !== expected) return;
+    if (!event.data || event.data.type !== '3ds-challenge-complete') return;
+    log('Challenge callback message received from ' + event.origin);
+    if (state.awaitingChallenge) validate('callback');
+  });
+
+  async function validate(trigger) {
+    if (!state.paymentId || state.validating) return;
+    state.validating = true;
+    $('validateBtn').disabled = true;
+    setStep('challenge', 'done', trigger === 'callback' ? 'callback received' : '');
+    setStep('validate', 'running', 'triggered by ' + trigger);
+    try {
+      const result = await post('/validation', { paymentId: state.paymentId, card: card() });
+      state.awaitingChallenge = false;
+      const ok = result.outcome === 'AUTHENTICATED';
+      setStep('validate', ok ? 'done' : 'error', result.outcome);
+      showResult(ok ? 'AUTHENTICATED' : 'AUTHENTICATION FAILED', ok);
+    } catch (e) {
+      setStep('validate', 'error', e.message.slice(0, 60));
+      log('Validation error: ' + e.message);
+    } finally {
+      state.validating = false;
+      $('validateBtn').disabled = false;
+    }
+  }
+
+  // ---------- the flow ----------
+  async function run() {
+    resetUi();
+    $('run').disabled = true;
+    try {
+      log('Using API base URL ' + apiBase());
+      setStep('setup', 'running');
+      const setup = await post('/setup', { card: card() });
+      state.paymentId = setup.paymentId;
+      setStep('setup', 'done', 'paymentId ' + setup.paymentId.slice(0, 8));
+
+      setStep('ddc', 'running');
+      const ddc = await deviceDataCollection(setup.deviceDataCollectionUrl, setup.accessToken);
+      setStep('ddc', 'done', ddc);
+
+      setStep('enroll', 'running');
+      const enrollment = await post('/enrollment', {
+        paymentId: setup.paymentId,
+        card: card(),
+        amount: Number($('amount').value),
+        currency: $('currency').value.trim(),
+        billTo: {
+          firstName: $('firstName').value, lastName: $('lastName').value, email: $('email').value,
+          address1: $('address1').value, locality: $('locality').value,
+          administrativeArea: $('administrativeArea').value, postalCode: $('postalCode').value,
+          country: $('country').value
+        },
+        browser: browserInfo(),
+        returnUrl: apiUrl('/challenge-callback')
+      });
+      setStep('enroll', 'done', enrollment.outcome);
+
+      if (enrollment.outcome === 'CHALLENGE_REQUIRED') {
+        setStep('challenge', 'running', 'complete it in the frame');
+        $('challengeBox').style.display = 'block';
+        state.awaitingChallenge = true;
+        $('validateBtn').disabled = false;
+        postFormToFrame(enrollment.stepUpUrl, 'challengeFrame', { JWT: enrollment.accessToken, MD: setup.paymentId });
+        return; // continues in the message listener, or via the manual button
+      }
+      setStep('challenge', 'skipped', 'not needed');
+      setStep('validate', 'skipped', 'not needed');
+      const ok = enrollment.outcome === 'FRICTIONLESS_SUCCESS';
+      showResult(ok ? 'AUTHENTICATED (frictionless)' : enrollment.outcome, ok);
+    } catch (e) {
+      log('Flow stopped: ' + e.message);
+      const running = document.querySelector('li[data-state="running"]');
+      if (running) { running.dataset.state = 'error'; running.querySelector('.step-note').textContent = e.message.slice(0, 60); }
+      showResult('Stopped: ' + e.message, false);
+    } finally {
+      $('run').disabled = false;
+    }
+  }
+
+  function resetUi() {
+    document.querySelectorAll('#steps li').forEach((li) => { delete li.dataset.state; li.querySelector('.step-note').textContent = ''; });
+    $('result').textContent = '';
+    $('result').className = '';
+    $('challengeBox').style.display = 'none';
+    $('challengeFrame').removeAttribute('src');
+    $('challengeFrame').contentWindow && $('challengeFrame').contentWindow.location.replace('about:blank');
+    state.paymentId = null;
+    state.awaitingChallenge = false;
+    $('validateBtn').disabled = true;
+  }
+
+  $('run').addEventListener('click', run);
+  $('validateBtn').addEventListener('click', () => validate('manual button'));
+  $('reset').addEventListener('click', () => { resetUi(); $('log').textContent = ''; });
+})();
+</script>
+</body>
+</html>

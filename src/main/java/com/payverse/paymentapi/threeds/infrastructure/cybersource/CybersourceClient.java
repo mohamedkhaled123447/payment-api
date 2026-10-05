@@ -4,8 +4,10 @@ import Api.PayerAuthenticationApi;
 import Invokers.ApiException;
 import Model.CheckPayerAuthEnrollmentRequest;
 import Model.PayerAuthSetupRequest;
+import Model.RiskV1AuthenticationResultsPost201Response;
 import Model.RiskV1AuthenticationsPost201Response;
 import Model.RiskV1AuthenticationSetupsPost201Response;
+import Model.ValidateRequest;
 import com.cybersource.authsdk.core.ConfigException;
 import org.springframework.stereotype.Component;
 
@@ -31,6 +33,14 @@ public class CybersourceClient {
             return payerAuthenticationApi.checkPayerAuthEnrollment(request);
         } catch (ApiException | ConfigException exception) {
             throw new CybersourceClientException("Cybersource enrollment check request failed", exception);
+        }
+    }
+
+    public RiskV1AuthenticationResultsPost201Response validateAuthentication(ValidateRequest request) {
+        try {
+            return payerAuthenticationApi.validateAuthenticationResults(request);
+        } catch (ApiException | ConfigException exception) {
+            throw new CybersourceClientException("Cybersource authentication validation request failed", exception);
         }
     }
 }
