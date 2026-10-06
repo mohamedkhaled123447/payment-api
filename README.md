@@ -1,5 +1,22 @@
 # payment-api
 
+## Configuration
+
+The app reads its secrets from environment variables and refuses to start if a required one is missing.
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `PAYVERSE_DB_URL`, `PAYVERSE_DB_USERNAME`, `PAYVERSE_DB_PASSWORD` | yes | PostgreSQL connection |
+| `CYBERSOURCE_MERCHANT_ID`, `CYBERSOURCE_MERCHANT_KEY_ID`, `CYBERSOURCE_MERCHANT_SECRET_KEY` | yes | Cybersource REST credentials |
+| `CYBERSOURCE_RUN_ENVIRONMENT` | no (`apitest.cybersource.com`) | Cybersource host |
+| `THREEDS_FRONTEND_ORIGIN` | no (`http://localhost:63342`) | Checkout origin that hosts the 3DS challenge iframe |
+| `CORS_ALLOWED_ORIGINS` | no (same as `THREEDS_FRONTEND_ORIGIN`) | Comma-separated browser origins allowed to call the API |
+| `PAYVERSE_JPA_SHOW_SQL`, `PAYVERSE_JPA_FORMAT_SQL` | no (`false`) | SQL logging; may expose sensitive data, keep off outside local debugging |
+
+Local development: copy `.env.example` to `.env` (git-ignored), fill it in and run with `--spring.profiles.active=local`.
+Never commit real credentials.
+
+
 
 
 ## Getting started
