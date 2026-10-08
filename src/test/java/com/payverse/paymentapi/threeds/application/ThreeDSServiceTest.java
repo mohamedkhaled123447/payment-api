@@ -1,5 +1,11 @@
 package com.payverse.paymentapi.threeds.application;
 
+import com.payverse.paymentapi.payment.application.PaymentNotFoundException;
+import com.payverse.paymentapi.payment.domain.CaptureMethod;
+import com.payverse.paymentapi.payment.domain.Payment;
+import com.payverse.paymentapi.payment.domain.PaymentInvalidStateException;
+import com.payverse.paymentapi.payment.domain.PaymentStatus;
+import com.payverse.paymentapi.payment.persistence.PaymentRepository;
 import com.payverse.paymentapi.threeds.model.ThreeDSBillTo;
 import com.payverse.paymentapi.threeds.model.ThreeDSBrowser;
 import com.payverse.paymentapi.threeds.model.ThreeDSCard;
@@ -23,6 +29,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -48,13 +56,17 @@ import static org.mockito.Mockito.when;
 
 class ThreeDSServiceTest {
 
+    // --- setup ---
+
+    private ThreeDSSetupRequest setupRequest(Payment payment) {
+        return new ThreeDSSetupRequest(payment.getId(), new ThreeDSCard("4111111111111111", "12", "2028"));
+    }
+
     @Test
-    void setupPersistsTheProviderSessionAndReturnsAGeneratedPaymentId() {
-        ThreeDSProvider provider = mock(ThreeDSProvider.class);
-        ThreeDSSessionRepository repository = mock(ThreeDSSessionRepository.class);
-        ThreeDSService service = new ThreeDSService(provider, repository, CLAIM_TIMEOUT);
-        ThreeDSSetupRequest request = new ThreeDSSetupRequest(
-                new ThreeDSCard("4111111111111111", "12", "2028"));
+    void setupStartsThreeDSOnTheExistingPaymentAndPersistsTheProviderSession() {
+        Payment payment = newPayment();
+        when(paymentRepository.findById(payment.getId())).thenReturn(Optional.of(payment));
+        ThreeDSSetupRequest request = setupRequest(payment);
         ThreeDSSetupResponse providerResponse = new ThreeDSSetupResponse(
                 "reference-id",
                 "access-token",
@@ -66,46 +78,84 @@ class ThreeDSServiceTest {
         assertEquals(providerResponse.referenceId(), actual.referenceId());
         assertEquals(providerResponse.accessToken(), actual.accessToken());
         assertEquals(providerResponse.deviceDataCollectionUrl(), actual.deviceDataCollectionUrl());
-        assertNotNull(actual.paymentId());
-        verify(provider).setup(request);
+        assertEquals(payment.getId(), actual.paymentId());
+        assertEquals(PaymentStatus.THREE_DS_PENDING, payment.getStatus());
+        verify(paymentRepository).save(payment);
         ArgumentCaptor<ThreeDSSession> sessionCaptor = ArgumentCaptor.forClass(ThreeDSSession.class);
         verify(repository).save(sessionCaptor.capture());
 
         ThreeDSSession session = sessionCaptor.getValue();
-        assertEquals(actual.paymentId(), session.getPaymentId());
+        assertEquals(payment.getId(), session.getPaymentId());
         assertEquals(ThreeDSProviderType.CYBERSOURCE, session.getProvider());
         assertEquals("reference-id", session.getProviderReferenceId());
         assertEquals(ThreeDSSessionStatus.SETUP_COMPLETED, session.getStatus());
     }
 
     @Test
-    void setupDoesNotPersistASessionWhenTheProviderFails() {
-        ThreeDSProvider provider = mock(ThreeDSProvider.class);
-        ThreeDSSessionRepository repository = mock(ThreeDSSessionRepository.class);
-        ThreeDSService service = new ThreeDSService(provider, repository, CLAIM_TIMEOUT);
-        ThreeDSSetupRequest request = new ThreeDSSetupRequest(
-                new ThreeDSCard("4111111111111111", "12", "2028"));
+    void setupDoesNotChangeThePaymentOrPersistASessionWhenTheProviderFails() {
+        Payment payment = newPayment();
+        when(paymentRepository.findById(payment.getId())).thenReturn(Optional.of(payment));
+        ThreeDSSetupRequest request = setupRequest(payment);
         when(provider.setup(request)).thenThrow(new ThreeDSProviderException("Cybersource setup failed"));
 
         assertThrows(ThreeDSProviderException.class, () -> service.setup(request));
 
-        verify(provider).setup(request);
-        verifyNoInteractions(repository);
+        assertEquals(PaymentStatus.CREATED, payment.getStatus());
+        verify(paymentRepository, never()).save(any());
+        verify(repository, never()).save(any());
     }
+
+    @Test
+    void setupRejectsAnUnknownPaymentWithoutCallingTheProvider() {
+        Payment payment = newPayment();
+        when(paymentRepository.findById(payment.getId())).thenReturn(Optional.empty());
+
+        assertThrows(PaymentNotFoundException.class, () -> service.setup(setupRequest(payment)));
+
+        verifyNoInteractions(provider);
+    }
+
+    @Test
+    void setupRejectsAPaymentThatAlreadyStartedThreeDSWithoutCallingTheProvider() {
+        Payment payment = newPayment();
+        payment.startThreeDS();
+        when(paymentRepository.findById(payment.getId())).thenReturn(Optional.of(payment));
+
+        assertThrows(PaymentInvalidStateException.class, () -> service.setup(setupRequest(payment)));
+
+        verifyNoInteractions(provider);
+        verify(repository, never()).save(any());
+    }
+
+    // --- enrollment ---
 
     private static final UUID PAYMENT_ID = UUID.randomUUID();
     private static final Duration CLAIM_TIMEOUT = Duration.ofMinutes(2);
 
     private final ThreeDSProvider provider = mock(ThreeDSProvider.class);
     private final ThreeDSSessionRepository repository = mock(ThreeDSSessionRepository.class);
-    private final ThreeDSService service = new ThreeDSService(provider, repository, CLAIM_TIMEOUT);
+    private final PaymentRepository paymentRepository = mock(PaymentRepository.class);
+    // A real template over a mock transaction manager runs the callback without a database.
+    private final ThreeDSService service = new ThreeDSService(
+            provider,
+            repository,
+            paymentRepository,
+            new TransactionTemplate(mock(PlatformTransactionManager.class)),
+            CLAIM_TIMEOUT);
+
+    private static Payment newPayment() {
+        return Payment.create(new BigDecimal("49.9"), "usd", CaptureMethod.MANUAL, null);
+    }
+
+    @BeforeEach
+    void paymentOfTheEnrolledSessionExists() {
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(newPayment()));
+    }
 
     private ThreeDSEnrollmentRequest enrollmentRequest() {
         return new ThreeDSEnrollmentRequest(
                 PAYMENT_ID,
                 new ThreeDSCard("4111111111111111", "12", "2028"),
-                new BigDecimal("49.90"),
-                "usd",
                 new ThreeDSBillTo("Ann", "Lee", "ann@example.com", "1 Main St", "Austin", "TX", "73301", "US"),
                 new ThreeDSBrowser("text/html", "agent", "en-US", false, "24", "1080", "1920", "300"),
                 "https://shop.example/3ds/return");
@@ -137,8 +187,30 @@ class ThreeDSServiceTest {
         verify(provider).enroll(captor.capture());
         assertEquals("reference-id", captor.getValue().referenceId());
         assertEquals("203.0.113.7", captor.getValue().ipAddress());
-        assertEquals("USD", captor.getValue().currency());
         assertEquals(PAYMENT_ID, captor.getValue().paymentId());
+    }
+
+    @Test
+    void enrollTakesAmountAndCurrencyFromThePayment() {
+        when(repository.findByPaymentId(PAYMENT_ID)).thenReturn(Optional.of(session(ThreeDSSessionStatus.SETUP_COMPLETED)));
+        when(provider.enroll(any())).thenReturn(result(ThreeDSEnrollmentOutcome.FRICTIONLESS_SUCCESS));
+
+        service.enroll(enrollmentRequest(), "203.0.113.7");
+
+        ArgumentCaptor<ThreeDSEnrollmentCommand> captor = ArgumentCaptor.forClass(ThreeDSEnrollmentCommand.class);
+        verify(provider).enroll(captor.capture());
+        assertEquals(new BigDecimal("49.90"), captor.getValue().amount());
+        assertEquals("USD", captor.getValue().currency());
+    }
+
+    @Test
+    void enrollRejectsASessionWhosePaymentDoesNotExist() {
+        when(repository.findByPaymentId(PAYMENT_ID)).thenReturn(Optional.of(session(ThreeDSSessionStatus.SETUP_COMPLETED)));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.empty());
+
+        assertThrows(PaymentNotFoundException.class, () -> service.enroll(enrollmentRequest(), "203.0.113.7"));
+
+        verifyNoInteractions(provider);
     }
 
     @Test

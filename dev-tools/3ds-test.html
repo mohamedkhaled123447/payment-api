@@ -112,11 +112,12 @@
       <div class="panel">
         <h2>Progress</h2>
         <ol class="steps" id="steps">
-          <li data-step="setup"><span class="dot"></span>1. Setup <span class="step-note"></span></li>
-          <li data-step="ddc"><span class="dot"></span>2. Device data collection <span class="step-note"></span></li>
-          <li data-step="enroll"><span class="dot"></span>3. Enrollment check <span class="step-note"></span></li>
-          <li data-step="challenge"><span class="dot"></span>4. Bank challenge <span class="step-note"></span></li>
-          <li data-step="validate"><span class="dot"></span>5. Validation <span class="step-note"></span></li>
+          <li data-step="payment"><span class="dot"></span>1. Create payment <span class="step-note"></span></li>
+          <li data-step="setup"><span class="dot"></span>2. 3DS setup <span class="step-note"></span></li>
+          <li data-step="ddc"><span class="dot"></span>3. Device data collection <span class="step-note"></span></li>
+          <li data-step="enroll"><span class="dot"></span>4. Enrollment check <span class="step-note"></span></li>
+          <li data-step="challenge"><span class="dot"></span>5. Bank challenge <span class="step-note"></span></li>
+          <li data-step="validate"><span class="dot"></span>6. Validation <span class="step-note"></span></li>
         </ol>
         <p id="result"></p>
       </div>
@@ -137,7 +138,7 @@
 <script>
 (function () {
   'use strict';
-  const API_PATH = '/api/v1/3ds';
+  const API_PATH = '/api/v1';
   const BASE_KEY = '3ds-test.apiBase';
   const $ = (id) => document.getElementById(id);
   const state = { paymentId: null, validating: false, awaitingChallenge: false };
@@ -204,12 +205,12 @@
   }
 
   // ---------- API ----------
-  async function post(path, body) {
+  async function post(path, body, extraHeaders) {
     const url = apiUrl(path);
     log('POST ' + url, body);
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: Object.assign({ 'Content-Type': 'application/json' }, extraHeaders),
       body: JSON.stringify(body)
     });
     const text = await response.text();
@@ -307,7 +308,7 @@
     setStep('challenge', 'done', trigger === 'callback' ? 'callback received' : '');
     setStep('validate', 'running', 'triggered by ' + trigger);
     try {
-      const result = await post('/validation', { paymentId: state.paymentId, card: card() });
+      const result = await post('/3ds/validation', { paymentId: state.paymentId, card: card() });
       state.awaitingChallenge = false;
       const ok = result.outcome === 'AUTHENTICATED';
       setStep('validate', ok ? 'done' : 'error', result.outcome);
@@ -327,21 +328,29 @@
     $('run').disabled = true;
     try {
       log('Using API base URL ' + apiBase());
+      setStep('payment', 'running');
+      // One key per attempt: a retry of this same request would reuse it and get the same payment back.
+      const payment = await post('/payments', {
+        amount: $('amount').value.trim(),
+        currency: $('currency').value.trim(),
+        captureMethod: 'MANUAL',
+        merchantReference: '3ds-test'
+      }, { 'Idempotency-Key': crypto.randomUUID() });
+      state.paymentId = payment.id;
+      setStep('payment', 'done', 'paymentId ' + payment.id.slice(0, 8));
+
       setStep('setup', 'running');
-      const setup = await post('/setup', { card: card() });
-      state.paymentId = setup.paymentId;
-      setStep('setup', 'done', 'paymentId ' + setup.paymentId.slice(0, 8));
+      const setup = await post('/3ds/setup', { paymentId: payment.id, card: card() });
+      setStep('setup', 'done');
 
       setStep('ddc', 'running');
       const ddc = await deviceDataCollection(setup.deviceDataCollectionUrl, setup.accessToken);
       setStep('ddc', 'done', ddc);
 
       setStep('enroll', 'running');
-      const enrollment = await post('/enrollment', {
-        paymentId: setup.paymentId,
+      const enrollment = await post('/3ds/enrollment', {
+        paymentId: payment.id,
         card: card(),
-        amount: Number($('amount').value),
-        currency: $('currency').value.trim(),
         billTo: {
           firstName: $('firstName').value, lastName: $('lastName').value, email: $('email').value,
           address1: $('address1').value, locality: $('locality').value,
@@ -349,7 +358,7 @@
           country: $('country').value
         },
         browser: browserInfo(),
-        returnUrl: apiUrl('/challenge-callback')
+        returnUrl: apiUrl('/3ds/challenge-callback')
       });
       setStep('enroll', 'done', enrollment.outcome);
 
@@ -358,7 +367,7 @@
         $('challengeBox').style.display = 'block';
         state.awaitingChallenge = true;
         $('validateBtn').disabled = false;
-        postFormToFrame(enrollment.stepUpUrl, 'challengeFrame', { JWT: enrollment.accessToken, MD: setup.paymentId });
+        postFormToFrame(enrollment.stepUpUrl, 'challengeFrame', { JWT: enrollment.accessToken, MD: payment.id });
         return; // continues in the message listener, or via the manual button
       }
       setStep('challenge', 'skipped', 'not needed');

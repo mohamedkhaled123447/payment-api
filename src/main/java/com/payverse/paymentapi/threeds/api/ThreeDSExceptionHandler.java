@@ -1,5 +1,7 @@
 package com.payverse.paymentapi.threeds.api;
 
+import com.payverse.paymentapi.payment.application.PaymentNotFoundException;
+import com.payverse.paymentapi.payment.domain.PaymentInvalidStateException;
 import com.payverse.paymentapi.threeds.application.ThreeDSInvalidStateException;
 import com.payverse.paymentapi.threeds.application.ThreeDSProviderException;
 import com.payverse.paymentapi.threeds.application.ThreeDSSessionNotFoundException;
@@ -17,15 +19,20 @@ public class ThreeDSExceptionHandler {
         return ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, exception.getMessage());
     }
 
-    @ExceptionHandler(ThreeDSInvalidStateException.class)
-    ProblemDetail invalidState(ThreeDSInvalidStateException exception) {
+    @ExceptionHandler(PaymentNotFoundException.class)
+    ProblemDetail paymentNotFound(PaymentNotFoundException exception) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, exception.getMessage());
+    }
+
+    @ExceptionHandler({ThreeDSInvalidStateException.class, PaymentInvalidStateException.class})
+    ProblemDetail invalidState(RuntimeException exception) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, exception.getMessage());
     }
 
     @ExceptionHandler(OptimisticLockingFailureException.class)
     ProblemDetail concurrentUpdate() {
         return ProblemDetail.forStatusAndDetail(
-                HttpStatus.CONFLICT, "The 3DS session was modified by another request");
+                HttpStatus.CONFLICT, "The payment or its 3DS session was modified by another request");
     }
 
     @ExceptionHandler(ThreeDSProviderException.class)

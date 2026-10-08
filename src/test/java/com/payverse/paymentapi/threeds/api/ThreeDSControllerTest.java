@@ -1,11 +1,16 @@
 package com.payverse.paymentapi.threeds.api;
 
+import com.payverse.paymentapi.payment.application.PaymentNotFoundException;
+import com.payverse.paymentapi.payment.domain.PaymentInvalidStateException;
+import com.payverse.paymentapi.payment.domain.PaymentStatus;
 import com.payverse.paymentapi.threeds.application.ThreeDSInvalidStateException;
 import com.payverse.paymentapi.threeds.application.ThreeDSProviderException;
 import com.payverse.paymentapi.threeds.application.ThreeDSService;
 import com.payverse.paymentapi.threeds.application.ThreeDSSessionNotFoundException;
 import com.payverse.paymentapi.threeds.model.ThreeDSEnrollmentOutcome;
 import com.payverse.paymentapi.threeds.model.ThreeDSEnrollmentResponse;
+import com.payverse.paymentapi.threeds.model.ThreeDSSetupRequest;
+import com.payverse.paymentapi.threeds.model.ThreeDSSetupResponse;
 import com.payverse.paymentapi.threeds.model.ThreeDSValidationOutcome;
 import com.payverse.paymentapi.threeds.model.ThreeDSValidationRequest;
 import com.payverse.paymentapi.threeds.model.ThreeDSValidationResponse;
@@ -40,8 +45,6 @@ class ThreeDSControllerTest {
             {
               "paymentId": "7f0c1f5e-0000-4000-8000-000000000001",
               "card": {"number": "4111111111111111", "expirationMonth": "12", "expirationYear": "2028"},
-              "amount": 49.90,
-              "currency": "USD",
               "billTo": {"firstName": "Ann", "lastName": "Lee", "email": "ann@example.com",
                          "address1": "1 Main St", "locality": "Austin", "administrativeArea": "TX",
                          "postalCode": "73301", "country": "US"},
@@ -92,23 +95,72 @@ class ThreeDSControllerTest {
     @Test
     void enrollRejectsAnInvalidBody() throws Exception {
         enroll("{}").andExpect(status().isBadRequest());
-        enroll(VALID_BODY.replace("\"USD\"", "\"US\"")).andExpect(status().isBadRequest());
-        enroll(VALID_BODY.replace("49.90", "0")).andExpect(status().isBadRequest());
+        enroll(VALID_BODY.replace("\"https://shop.example/3ds/return\"", "\"\"")).andExpect(status().isBadRequest());
+        enroll(VALID_BODY.replace("\"Ann\"", "null")).andExpect(status().isBadRequest());
     }
 
     @Test
     void enrollMapsDomainErrorsToHttpStatuses() throws Exception {
         when(threeDSService.enroll(any(), any()))
                 .thenThrow(new ThreeDSSessionNotFoundException(PAYMENT_ID))
+                .thenThrow(new PaymentNotFoundException(PAYMENT_ID))
                 .thenThrow(new ThreeDSInvalidStateException(PAYMENT_ID, ThreeDSSessionStatus.AUTHENTICATED))
                 .thenThrow(new OptimisticLockingFailureException("stale"))
                 .thenThrow(new ThreeDSProviderException("secret provider detail"));
 
         enroll(VALID_BODY).andExpect(status().isNotFound());
+        enroll(VALID_BODY).andExpect(status().isNotFound());
         enroll(VALID_BODY).andExpect(status().isConflict());
         enroll(VALID_BODY).andExpect(status().isConflict());
         enroll(VALID_BODY).andExpect(status().isBadGateway())
                 .andExpect(jsonPath("$.detail").value("The 3DS provider could not process the request"));
+    }
+
+    private static final String SETUP_BODY = """
+            {
+              "paymentId": "7f0c1f5e-0000-4000-8000-000000000001",
+              "card": {"number": "4111111111111111", "expirationMonth": "12", "expirationYear": "2028"}
+            }
+            """;
+
+    private org.springframework.test.web.servlet.ResultActions setup(String body) throws Exception {
+        return mockMvc.perform(post("/api/v1/3ds/setup")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body));
+    }
+
+    @Test
+    void setupPassesThePaymentIdToTheServiceAndReturnsTheDeviceDataCollectionData() throws Exception {
+        when(threeDSService.setup(any())).thenReturn(new ThreeDSSetupResponse(
+                "reference-id", "jwt", "https://device-data.example", PAYMENT_ID));
+
+        setup(SETUP_BODY)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.paymentId").value(PAYMENT_ID.toString()))
+                .andExpect(jsonPath("$.deviceDataCollectionUrl").value("https://device-data.example"));
+
+        ArgumentCaptor<ThreeDSSetupRequest> captor = ArgumentCaptor.forClass(ThreeDSSetupRequest.class);
+        verify(threeDSService).setup(captor.capture());
+        assertEquals(PAYMENT_ID, captor.getValue().paymentId());
+    }
+
+    @Test
+    void setupRequiresAPaymentId() throws Exception {
+        setup(SETUP_BODY.replace("\"paymentId\": \"7f0c1f5e-0000-4000-8000-000000000001\",", ""))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(threeDSService);
+    }
+
+    @Test
+    void setupMapsAMissingPaymentTo404AndAPaymentInTheWrongStateTo409() throws Exception {
+        when(threeDSService.setup(any()))
+                .thenThrow(new PaymentNotFoundException(PAYMENT_ID))
+                .thenThrow(new PaymentInvalidStateException(
+                        PAYMENT_ID, PaymentStatus.THREE_DS_PENDING, PaymentStatus.THREE_DS_PENDING));
+
+        setup(SETUP_BODY).andExpect(status().isNotFound());
+        setup(SETUP_BODY).andExpect(status().isConflict());
     }
 
     private static final String VALIDATION_BODY = """

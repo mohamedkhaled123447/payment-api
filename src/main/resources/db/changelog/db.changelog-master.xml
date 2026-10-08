@@ -6,4 +6,5 @@
 
     <include file="changesets/002-create-three-ds-sessions-table.sql" relativeToChangelogFile="true"/>
     <include file="changesets/003-add-enrollment-fields-to-three-ds-sessions.sql" relativeToChangelogFile="true"/>
+    <include file="changesets/004-create-payments-and-idempotency-keys.sql" relativeToChangelogFile="true"/>
 </databaseChangeLog>

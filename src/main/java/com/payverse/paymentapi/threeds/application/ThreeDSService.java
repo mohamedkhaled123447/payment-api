@@ -1,5 +1,8 @@
 package com.payverse.paymentapi.threeds.application;
 
+import com.payverse.paymentapi.payment.application.PaymentNotFoundException;
+import com.payverse.paymentapi.payment.domain.Payment;
+import com.payverse.paymentapi.payment.persistence.PaymentRepository;
 import com.payverse.paymentapi.threeds.model.ThreeDSEnrollmentCommand;
 import com.payverse.paymentapi.threeds.model.ThreeDSEnrollmentOutcome;
 import com.payverse.paymentapi.threeds.model.ThreeDSEnrollmentRequest;
@@ -18,6 +21,7 @@ import com.payverse.paymentapi.threeds.persistence.ThreeDSSessionRepository;
 import com.payverse.paymentapi.threeds.persistence.ThreeDSSessionStatus;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -28,28 +32,44 @@ public class ThreeDSService {
 
     private final ThreeDSProvider threeDSProvider;
     private final ThreeDSSessionRepository threeDSSessionRepository;
+    private final PaymentRepository paymentRepository;
+    private final TransactionTemplate transactionTemplate;
     private final Duration validationClaimTimeout;
 
     public ThreeDSService(
             ThreeDSProvider threeDSProvider,
             ThreeDSSessionRepository threeDSSessionRepository,
+            PaymentRepository paymentRepository,
+            TransactionTemplate transactionTemplate,
             @Value("${threeds.validation-claim-timeout:PT2M}") Duration validationClaimTimeout) {
         this.threeDSProvider = threeDSProvider;
         this.threeDSSessionRepository = threeDSSessionRepository;
+        this.paymentRepository = paymentRepository;
+        this.transactionTemplate = transactionTemplate;
         this.validationClaimTimeout = validationClaimTimeout;
     }
 
     public ThreeDSSetupResponse setup(ThreeDSSetupRequest request) {
+        Payment payment = findPayment(request.paymentId());
+        // Reject before calling the provider; the payment itself changes only once setup succeeded.
+        payment.ensureCanStartThreeDS();
+
         ThreeDSSetupResponse response = threeDSProvider.setup(request);
-        UUID paymentId = UUID.randomUUID();
+
         ThreeDSSession session = new ThreeDSSession();
-        session.setPaymentId(paymentId);
+        session.setPaymentId(payment.getId());
         session.setProvider(ThreeDSProviderType.CYBERSOURCE);
         session.setStatus(ThreeDSSessionStatus.SETUP_COMPLETED);
         session.setProviderReferenceId(response.referenceId());
-        threeDSSessionRepository.save(session);
+        // One transaction, so a payment is never THREE_DS_PENDING without its session. The payment's
+        // @Version rejects a concurrent setup of the same payment.
+        transactionTemplate.executeWithoutResult(status -> {
+            payment.startThreeDS();
+            paymentRepository.save(payment);
+            threeDSSessionRepository.save(session);
+        });
 
-        return response.withPaymentId(paymentId);
+        return response.withPaymentId(payment.getId());
     }
 
     public ThreeDSEnrollmentResponse enroll(ThreeDSEnrollmentRequest request, String ipAddress) {
@@ -58,6 +78,8 @@ public class ThreeDSService {
         if (session.getStatus() != ThreeDSSessionStatus.SETUP_COMPLETED) {
             throw new ThreeDSInvalidStateException(request.paymentId(), session.getStatus());
         }
+        // The payment owns amount and currency (D7); the client can't authenticate a different amount.
+        Payment payment = findPayment(session.getPaymentId());
 
         // The provider call runs outside any DB transaction; @Version on the session
         // rejects a concurrent enrollment of the same payment when we save below.
@@ -65,16 +87,17 @@ public class ThreeDSService {
                 request.paymentId(),
                 session.getProviderReferenceId(),
                 request.card(),
-                request.amount(),
-                request.currency().toUpperCase(),
+                payment.getAmount(),
+                payment.getCurrency(),
                 request.billTo(),
                 request.browser(),
                 ipAddress,
                 request.returnUrl()));
 
         session.setStatus(statusFor(result.outcome()));
-        session.setAmount(request.amount());
-        session.setCurrency(request.currency().toUpperCase());
+        // Kept on the session as a record of the amount that was authenticated.
+        session.setAmount(payment.getAmount());
+        session.setCurrency(payment.getCurrency());
         session.setAuthenticationTransactionId(result.authenticationTransactionId());
         session.setAuthenticationValue(result.authenticationValue());
         session.setEci(result.eci());
@@ -142,6 +165,11 @@ public class ThreeDSService {
         threeDSSessionRepository.save(session);
 
         return new ThreeDSValidationResponse(request.paymentId(), result.outcome());
+    }
+
+    private Payment findPayment(UUID paymentId) {
+        return paymentRepository.findById(paymentId)
+                .orElseThrow(() -> new PaymentNotFoundException(paymentId));
     }
 
     private boolean claimExpired(ThreeDSSession session) {

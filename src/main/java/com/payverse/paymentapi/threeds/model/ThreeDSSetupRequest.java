@@ -3,5 +3,7 @@ package com.payverse.paymentapi.threeds.model;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
 
-public record ThreeDSSetupRequest(@NotNull @Valid ThreeDSCard card) {
+import java.util.UUID;
+
+public record ThreeDSSetupRequest(@NotNull UUID paymentId, @NotNull @Valid ThreeDSCard card) {
 }

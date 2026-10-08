@@ -38,6 +38,25 @@ class CorsConfigTest {
     }
 
     @Test
+    void allowsTheIdempotencyKeyHeader() throws Exception {
+        mockMvc.perform(options(SETUP)
+                        .header("Origin", "https://shop.example")
+                        .header("Access-Control-Request-Method", "POST")
+                        .header("Access-Control-Request-Headers", "Content-Type, Idempotency-Key"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Access-Control-Allow-Headers", "Content-Type, Idempotency-Key"));
+    }
+
+    @Test
+    void rejectsHeadersTheApiDoesNotUse() throws Exception {
+        mockMvc.perform(options(SETUP)
+                        .header("Origin", "https://shop.example")
+                        .header("Access-Control-Request-Method", "POST")
+                        .header("Access-Control-Request-Headers", "X-Custom"))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
     void rejectsAPreflightFromAnUnlistedOrigin() throws Exception {
         mockMvc.perform(options(SETUP)
                         .header("Origin", "https://evil.example")

@@ -16,6 +16,18 @@ The app reads its secrets from environment variables and refuses to start if a r
 Local development: copy `.env.example` to `.env` (git-ignored), fill it in and run with `--spring.profiles.active=local`.
 Never commit real credentials.
 
+## Payment flow
+
+A payment is created first; 3DS runs against it. Design and decisions: [docs/design/payments.md](docs/design/payments.md).
+
+1. `POST /api/v1/payments` with an `Idempotency-Key` header (a new UUID per payment attempt, reused on retries of that attempt) and `{"amount": "49.90", "currency": "USD", "captureMethod": "MANUAL"}`. Returns `201` with the payment `id`.
+   A retry with the same key and body returns the original response with `Idempotent-Replayed: true`; the same key with a different body returns `422`.
+2. `POST /api/v1/3ds/setup` with `{"paymentId": "...", "card": {...}}`. The payment must be `CREATED`.
+3. `POST /api/v1/3ds/enrollment` with the `paymentId`, card, billing and browser data. Amount and currency come from the payment.
+4. `POST /api/v1/3ds/validation` after a challenge.
+
+`GET /api/v1/payments/{id}` returns a payment. `dev-tools/3ds-test.html` runs the whole flow in a browser.
+
 
 
 
